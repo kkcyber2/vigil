@@ -42,8 +42,6 @@ class TestTamperDetection:
     def test_mutated_field_breaks_verification(self, fixed_clock):
         log = AuditLog(clock=fixed_clock)
         log.record("process", "pid:1", "r", "low", "alert", False)
-        # Reach past the dataclass's frozen-ness the way an attacker editing a
-        # file or a careless in-memory edit would.
         object.__setattr__(log._entries[0], "detail", "edited")
         assert log.verify() is False
 
@@ -54,17 +52,19 @@ class TestTamperDetection:
         del log._entries[1]
         assert log.verify() is False
 
-    def test_deleted_tail_entry_breaks_verification(self, fixed_clock):
-        """Truncation is the most likely real-world edit, and it must be visible."""
+    def test_deleted_tail_entry_changes_the_head_hash(self, fixed_clock):
+        """Truncation is undetectable from the file alone.
+
+        The remaining chain still self-verifies, which is exactly why
+        head_hash must be published elsewhere. This test pins that known
+        limitation rather than pretending the chain catches it.
+        """
         log = AuditLog(clock=fixed_clock)
         for _ in range(3):
             log.record("process", "pid:1", "r", "low", "alert", False)
         original_head = log.head_hash()
         log._entries.pop()
         assert log.head_hash() != original_head
-        # The remaining chain still self-verifies, which is exactly why the head
-        # hash must be recorded elsewhere: truncation alone is undetectable
-        # from the file, so callers should persist head_hash.
         assert log.verify() is True
 
     def test_resequenced_entry_breaks_verification(self, fixed_clock):
@@ -76,17 +76,42 @@ class TestTamperDetection:
 
 
 class TestSummary:
-    def test_counts_executed_and_planned(self, fixed_clock):
+    def test_counts_executed_planned_and_refused(self, fixed_clock):
+        """The three buckets are mutually exclusive.
+
+        This test previously asserted planned_only=2 and refused=1 across two
+        non-executed entries -- arithmetically impossible, and it locked in a
+        real bug: a dry-run entry was tallied as both. A summary whose buckets
+        overlap cannot answer "how many actions did the policy actually stop?".
+        """
         log = AuditLog(clock=fixed_clock)
         log.record("process", "pid:1", "r", "high", "kill", True)
-        log.record("process", "pid:2", "r", "high", "kill", False)
-        log.record("process", "pid:3", "r", "high", "kill", False, "refused: dry_run")
+        log.record("process", "pid:2", "r", "high", "kill", False, "refused: dry_run")
+        log.record("process", "pid:3", "r", "high", "kill", False, "refused: pid 1 protected")
         summary = log.summary()
         assert summary["entries"] == 3
         assert summary["executed"] == 1
-        assert summary["planned_only"] == 2
+        assert summary["planned_only"] == 1
         assert summary["refused"] == 1
         assert summary["chain_valid"] is True
+
+    def test_buckets_sum_to_entry_count(self, fixed_clock):
+        """Every entry lands in exactly one bucket. Asserted as an invariant."""
+        log = AuditLog(clock=fixed_clock)
+        log.record("process", "a", "r", "low", "alert", True)
+        log.record("process", "b", "r", "low", "alert", False, "refused: dry_run enabled")
+        log.record("process", "c", "r", "low", "kill", False, "refused: uid 0")
+        log.record("process", "d", "r", "low", "kill", False, "below min_severity high")
+        s = log.summary()
+        assert s["executed"] + s["planned_only"] + s["refused"] == s["entries"]
+
+    def test_dry_run_is_not_counted_as_a_refusal(self, fixed_clock):
+        """A dry run is the whole mode of the tool; it is not the policy saying no."""
+        log = AuditLog(clock=fixed_clock)
+        log.record("process", "a", "r", "high", "kill", False, "refused: dry_run enabled")
+        s = log.summary()
+        assert s["planned_only"] == 1
+        assert s["refused"] == 0
 
     def test_by_action_tallies(self, fixed_clock):
         log = AuditLog(clock=fixed_clock)
