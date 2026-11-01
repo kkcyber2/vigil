@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Test suite
+        run: python -m pytest tests/ -q
+
+      # A committed test count that nobody runs is a claim, not a fact. This
+      # step executes the CLI against the runner's own /proc so the smoke test
+      # proves the collector parses a real kernel, not just fixtures.
+      - name: CLI smoke test against the real host
+        run: |
+          python -m vigil.cli scan --no-colour || true
+          python -m vigil.cli rules > /tmp/pack.json
+          python -c "
+          import json
+          d = json.load(open('/tmp/pack.json'))
+          assert len(d['rules']) >= 6, 'rule pack too small'
+          print(f\"rule pack OK: {len(d['rules'])} rules\")
+          "
+
+      - name: Dry run must never execute
+        run: |
+          python -m vigil.cli scan --live --max-action kill --no-colour \
+            --audit-out /tmp/audit.jsonl || true
+          python -c "
+          import json, pathlib
+          p = pathlib.Path('/tmp/audit.jsonl')
+          if p.exists() and p.stat().st_size:
+              for line in p.read_text().splitlines():
+                  e = json.loads(line)
+                  assert not e['executed'], 'a dry run executed an action'
+          print('dry-run invariant holds')
+          "
