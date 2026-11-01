@@ -2,8 +2,8 @@
 
 An autonomous host defender for Linux. It watches processes and network
 connections, matches them against declarative rules, and — **only if you let it** —
-kills, quarantines or blocks. Every decision it makes is written to a
-hash-chained audit log, including the decisions *not* to act.
+kills, quarantines or blocks. Every decision is written to a hash-chained audit
+log, including the decisions *not* to act.
 
 The design centres on one idea: **an autonomous responder that cannot explain
 what it did is more dangerous than no responder at all.** So dry-run is the
@@ -21,9 +21,9 @@ vigil: scanned 21 processes, 13 connections
   0 executed, 1 recorded only, 0 refused
 ```
 
-*(Real output from a run against this project's own build container, with a
-deliberately staged `/tmp` binary. Not a mock-up. Process and connection counts
-vary by machine and moment — they are counts, not constants.)*
+*(Real output, against this project's own build container with a deliberately
+staged `/tmp` binary. Counts vary by machine — they are measurements, not
+constants.)*
 
 ## Install
 
@@ -38,16 +38,16 @@ Python 3.9+. No runtime dependencies — stdlib only. Linux only (it reads `/pro
 ## Use
 
 ```bash
-vigil scan                      # dry run against the built-in rule pack
-vigil scan --json               # machine-readable
+vigil scan                       # dry run against the built-in rule pack
+vigil scan --json                # machine-readable
 vigil scan --audit-out run.jsonl
-vigil scan --live --max-action quarantine    # actually respond
-vigil rules                     # dump the rule pack as JSON
-vigil validate my-rules.json    # check a pack for authoring mistakes
+vigil scan --live --max-action quarantine     # actually respond
+vigil rules                      # dump the rule pack as JSON
+vigil validate my-rules.json     # check a pack for authoring mistakes
 ```
 
-Exit code is `1` when anything at `high` or above is found, so this composes
-with cron and CI without parsing output.
+Exit code is `1` when anything at `high` or above is found, so this composes with
+cron and CI without parsing output.
 
 ### Turning on response
 
@@ -57,12 +57,30 @@ Three independent things must all be true before an action runs:
 2. the action's rank is at or below `--max-action` (default `alert`)
 3. the policy permits the target
 
-Rank order is `alert < block < quarantine < kill`.
+Rank order is `alert < block < quarantine < kill`. `--allow-uid` lets you permit
+action against a uid you own; root-owned processes are protected by default and
+`pid 1` is refused outright, at both the policy and the actuator layer.
 
-## Writing rules
+## What it detects
 
-Rules are JSON, so a pack can be reviewed in a pull request without reading
-Python.
+Seven rules ship in the default pack:
+
+| Rule | Severity | Action |
+|---|---|---|
+| `proc-deleted-binary` — binary deleted from disk, process still running | critical | alert |
+| `proc-tmp-exec` — executable in a world-writable directory | high | alert |
+| `proc-shell-from-tmp` — interpreter with a temp-dir binary | high | alert |
+| `conn-tmp-process-egress` — temp-dir process with established egress | high | alert |
+| `proc-crypto-miner-name` — known miner family names | high | quarantine |
+| `proc-netcat-listen` — netcat/socat in listen mode | medium | alert |
+| `conn-bare-ip-high-port` — bare-IP traffic on an ephemeral port | medium | alert |
+
+A finding is a lead, not a verdict. See **[docs/limitations.md](docs/limitations.md)**
+for what it fundamentally cannot see — no eBPF, no auditd, no persistence
+inspection, no state between runs — and why the pack is tuned for precision over
+recall.
+
+## Rules are data
 
 ```json
 {
@@ -82,7 +100,7 @@ Python.
 }
 ```
 
-Match modes: `exact`, `contains`, `contains_any`, `in`, `regex`, `exists`.
+Modes: `exact`, `contains`, `contains_any`, `in`, `regex`, `exists`.
 Scopes: `process`, `connection`, `any`.
 
 `vigil validate` warns about the mistake that actually bites — a rule scoped to
@@ -90,20 +108,25 @@ Scopes: `process`, `connection`, `any`.
 detector that silently never fires is worse than none: it produces false
 confidence.
 
-## The audit trail
+## Verification
 
-Each entry chains to its predecessor by SHA-256, so an edit or a deleted middle
-entry is detectable:
+**107 tests pass.** CI covers Python 3.9, 3.11 and 3.12, runs the CLI against the
+runner's own `/proc`, and asserts that no dry-run entry is ever marked `executed`.
 
-```python
-from vigil.audit import AuditLog
-log = AuditLog()
-log.record('process', 'pid:1', 'demo', 'low', 'alert', False)
-print(log.verify(), log.head_hash()[:16])
-```
+The response path was verified end to end against a real staged binary — including
+a run where the tool had both a matching rule and permission, and the action
+ceiling still stopped it. Two bugs that produced a *healthy-looking* audit trail
+while doing nothing were found this way and are pinned by regression tests. Full
+record, plus an explicit list of what was **not** verified:
+**[docs/verification.md](docs/verification.md)**.
 
-**Limitation, stated plainly:** the chain makes *silent* tampering require
-deliberate effort. It is not tamper-proof — anyone with write access to the
-file can rewrite the whole chain. Truncating the tail is undetectable from the
-file alone (the remaining chain still verifies), which is why `--audit-out`
-should be shipped somewhere append-only and `head_hash` recorded elsewhere.
+## Legal and authorised use
+
+Run this on hosts you own or are explicitly authorised to administer. It reads
+process and connection state, which on many systems is itself sensitive, and it
+can terminate processes. Unauthorised use against systems you do not control may
+be unlawful.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
